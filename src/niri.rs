@@ -145,7 +145,7 @@ use crate::layout::{
     HitType, Layout, LayoutElement as _, LayoutElementRenderElement, MonitorRenderElement,
 };
 use crate::niri_render_elements;
-use crate::protocols::ext_hotkey::{ExtHotkeyManagerState, Reason as ExtHotkeyReason};
+use crate::protocols::ext_hotkey::{ExtHotkeyManagerState, RevokeReason};
 use crate::protocols::ext_workspace::{self, ExtWorkspaceManagerState};
 use crate::protocols::foreign_toplevel::{self, ForeignToplevelManagerState};
 use crate::protocols::gamma_control::GammaControlManagerState;
@@ -1539,12 +1539,14 @@ impl State {
             self.niri.mods_with_finger_scroll_binds =
                 mods_with_finger_scroll_binds(new_mod_key, &config.binds);
 
-            // Revoke any active client hotkey that now conflicts with a configured bind.
+            // Revoke any active client hotkey that now conflicts with a configured bind. The
+            // configured bind takes the combination, so it's superseded (and may free up again if
+            // the user later removes that bind).
             self.niri.ext_hotkey_state.revoke_if(
-                ExtHotkeyReason::AlreadyBound,
+                RevokeReason::Superseded,
                 |keysym, modifiers| {
-                    !crate::input::hotkey_conflicts_with_binds(
-                        &config.binds,
+                    crate::input::conflicting_bind_message(
+                        &config,
                         new_mod_key,
                         keysym,
                         modifiers,

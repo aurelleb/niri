@@ -76,7 +76,7 @@ pub use crate::handlers::xdg_shell::KdeDecorationsModeState;
 use crate::layout::workspace::WorkspaceId;
 use crate::layout::ActivateWindow;
 use crate::niri::{DndIcon, NewClient, State};
-use crate::protocols::ext_hotkey::{ExtHotkeyHandler, ExtHotkeyManagerState, Reason};
+use crate::protocols::ext_hotkey::{DenyReason, ExtHotkeyHandler, ExtHotkeyManagerState};
 use crate::protocols::ext_workspace::{self, ExtWorkspaceHandler, ExtWorkspaceManagerState};
 use crate::protocols::foreign_toplevel::{
     self, ForeignToplevelHandler, ForeignToplevelManagerState,
@@ -870,10 +870,10 @@ impl ExtHotkeyHandler for State {
         &mut self,
         keysym: keyboard::Keysym,
         modifiers: niri_config::Modifiers,
-    ) -> Result<(), Reason> {
+    ) -> Result<(), (DenyReason, String)> {
         let config = self.niri.config.borrow();
         let mod_key = self.backend.mod_key(&config);
-        crate::input::decide_hotkey(&config.binds, mod_key, keysym, modifiers)
+        crate::input::decide_hotkey(&config, mod_key, keysym, modifiers)
     }
 }
 delegate_ext_hotkey!(State);

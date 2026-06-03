@@ -12,7 +12,7 @@ use smithay::reexports::wayland_server::{
 use super::raw::ext_hotkey::v1::server::ext_hotkey_manager_v1::{self, ExtHotkeyManagerV1};
 use super::raw::ext_hotkey::v1::server::ext_hotkey_v1::{self, ExtHotkeyV1};
 
-pub use ext_hotkey_v1::Reason;
+pub use ext_hotkey_v1::{DenyReason, RevokeReason};
 
 const VERSION: u32 = 1;
 
@@ -42,9 +42,13 @@ pub struct ExtHotkeyManagerGlobalData {
 pub trait ExtHotkeyHandler {
     fn ext_hotkey_manager_state(&mut self) -> &mut ExtHotkeyManagerState;
 
-    // Compositor policy: accept (`Ok`) or reject (`Err(reason)`) a bind request. `modifiers` holds
-    // only the semantic bits.
-    fn ext_hotkey_decide(&mut self, keysym: Keysym, modifiers: Modifiers) -> Result<(), Reason>;
+    // Compositor policy: accept (`Ok`) or reject (`Err((reason, message))`) a bind request, where
+    // `message` is advisory text for the client's UI. `modifiers` holds only the semantic bits.
+    fn ext_hotkey_decide(
+        &mut self,
+        keysym: Keysym,
+        modifiers: Modifiers,
+    ) -> Result<(), (DenyReason, String)>;
 }
 
 impl ExtHotkeyManagerState {
@@ -110,19 +114,19 @@ impl ExtHotkeyManagerState {
         fired
     }
 
-    // Revoke (`revoked`) every active hotkey for which `still_allowed` returns false. Used on
-    // config reload when a newly configured bind now conflicts.
+    // Revoke (`revoked`) every active hotkey for which `revoke_message` returns `Some(message)`;
+    // `None` keeps the hotkey. Used on config reload when a newly configured bind now conflicts.
     pub fn revoke_if(
         &mut self,
-        reason: Reason,
-        mut still_allowed: impl FnMut(Keysym, Modifiers) -> bool,
+        reason: RevokeReason,
+        mut revoke_message: impl FnMut(Keysym, Modifiers) -> Option<String>,
     ) {
         self.hotkeys.retain(|hotkey| {
-            if still_allowed(Keysym::new(hotkey.keysym), hotkey.modifiers) {
+            let Some(message) = revoke_message(Keysym::new(hotkey.keysym), hotkey.modifiers) else {
                 return true;
-            }
+            };
             if hotkey.resource.is_alive() {
-                hotkey.resource.revoked(reason);
+                hotkey.resource.revoked(reason, message);
             }
             false
         });
@@ -197,8 +201,8 @@ where
                             modifiers,
                         });
                     }
-                    Err(reason) => {
-                        hotkey.denied(reason);
+                    Err((reason, message)) => {
+                        hotkey.denied(reason, message);
                     }
                 }
             }

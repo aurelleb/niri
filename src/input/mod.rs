@@ -49,7 +49,7 @@ use crate::dbus::freedesktop_a11y::KbMonBlock;
 use crate::layout::scrolling::ScrollDirection;
 use crate::layout::{ActivateWindow, LayoutElement as _};
 use crate::niri::{CastTarget, PointerVisibility, State};
-use crate::protocols::ext_hotkey::Reason;
+use crate::protocols::ext_hotkey::DenyReason;
 use crate::ui::mru::{WindowMru, WindowMruUi};
 use crate::ui::screenshot_ui::ScreenshotUi;
 use crate::utils::spawning::{spawn, spawn_sh};
@@ -4548,34 +4548,29 @@ fn find_configured_bind<'a>(
     None
 }
 
-/// Decide whether a client may bind the given global hotkey (`ext_hotkey_v1`), per compositor
-/// policy. Returns `Ok(())` to accept or `Err(reason)` to reject with `denied`.
-///
-/// Rejects:
-/// - an invalid keysym (`Reason::Invalid`);
-/// - combinations without a non-latching modifier (Ctrl/Alt/Super) unless the trigger is a
-///   function key, as the protocol recommends, to avoid turning it into a keylogger
-///   (`Reason::NotPermitted`);
-/// - combinations that collide with a configured niri bind (`Reason::AlreadyBound`).
-///
-/// `modifiers` must contain only the semantic bits (CTRL, SHIFT, ALT, SUPER).
+// ext_hotkey_v1 bind policy. The combination must include Ctrl/Alt/Super (unless it's a function
+// key) so we don't turn into a keylogger, and must not collide with a configured niri bind.
+// `modifiers` holds only the semantic bits; the returned message is advisory text for the client.
 pub(crate) fn decide_hotkey(
-    binds: &Binds,
+    config: &Config,
     mod_key: ModKey,
     keysym: Keysym,
     modifiers: Modifiers,
-) -> Result<(), Reason> {
+) -> Result<(), (DenyReason, String)> {
     if keysym.raw() == 0 {
-        return Err(Reason::Invalid);
+        return Err((DenyReason::Invalid, String::from("Not a valid key combination")));
     }
 
     let has_real_mod = modifiers.intersects(Modifiers::CTRL | Modifiers::ALT | Modifiers::SUPER);
     if !has_real_mod && !is_function_key(keysym) {
-        return Err(Reason::NotPermitted);
+        return Err((
+            DenyReason::NotPermitted,
+            String::from("This key combination requires Ctrl, Alt or Super"),
+        ));
     }
 
-    if hotkey_conflicts_with_binds(binds, mod_key, keysym, modifiers) {
-        return Err(Reason::AlreadyBound);
+    if let Some(bind) = conflicting_bind(config, mod_key, keysym, modifiers) {
+        return Err((DenyReason::AlreadyBound, conflict_message(&bind)));
     }
 
     Ok(())
@@ -4585,15 +4580,15 @@ fn is_function_key(keysym: Keysym) -> bool {
     (keysyms::KEY_F1..=keysyms::KEY_F35).contains(&keysym.raw())
 }
 
-/// Whether the given global-hotkey combination collides with a configured niri bind. Matched the
-/// same way as live key presses (via [`find_configured_bind`]) so the answer is consistent with
-/// runtime behavior, including the `Mod` key resolution.
-pub(crate) fn hotkey_conflicts_with_binds(
-    binds: &Binds,
+// Matched via find_configured_bind, the same path as live key presses, so it stays consistent with
+// runtime behavior including the Mod key resolution. Includes the recent-windows (Alt+Tab) binds,
+// which are live whenever that feature is on even though they live outside the general binds.
+pub(crate) fn conflicting_bind(
+    config: &Config,
     mod_key: ModKey,
     keysym: Keysym,
     modifiers: Modifiers,
-) -> bool {
+) -> Option<Bind> {
     let mods = ModifiersState {
         ctrl: modifiers.contains(Modifiers::CTRL),
         alt: modifiers.contains(Modifiers::ALT),
@@ -4601,7 +4596,30 @@ pub(crate) fn hotkey_conflicts_with_binds(
         logo: modifiers.contains(Modifiers::SUPER),
         ..Default::default()
     };
-    find_configured_bind(&binds.0, mod_key, Trigger::Keysym(keysym), mods).is_some()
+    let recent = config
+        .recent_windows
+        .on
+        .then_some(config.recent_windows.binds.as_slice());
+    let binds = config.binds.0.iter().chain(recent.into_iter().flatten());
+    find_configured_bind(binds, mod_key, Trigger::Keysym(keysym), mods)
+}
+
+pub(crate) fn conflict_message(bind: &Bind) -> String {
+    // Same name niri shows in its hotkey overlay: custom title if set, else the action name.
+    let name = match &bind.hotkey_overlay_title {
+        Some(Some(custom)) => custom.clone(),
+        _ => crate::ui::hotkey_overlay::action_name(&bind.action),
+    };
+    format!("Conflicts with user defined shortcut '{name}'")
+}
+
+pub(crate) fn conflicting_bind_message(
+    config: &Config,
+    mod_key: ModKey,
+    keysym: Keysym,
+    modifiers: Modifiers,
+) -> Option<String> {
+    conflicting_bind(config, mod_key, keysym, modifiers).map(|bind| conflict_message(&bind))
 }
 
 fn find_configured_switch_action(
@@ -5581,24 +5599,27 @@ mod tests {
 
     #[test]
     fn ext_hotkey_decide_policy() {
-        // The user has Mod+T configured, with Mod = Super.
+        // The user has Mod+T configured, with Mod = Super. recent-windows is left at its default
+        // (on, with the built-in Alt+Tab binds).
         let mod_key = ModKey::Super;
-        let binds = Binds(vec![Bind {
-            key: Key {
-                trigger: Trigger::Keysym(Keysym::t),
-                modifiers: Modifiers::COMPOSITOR,
-            },
-            action: Action::CloseWindow,
-            repeat: false,
-            cooldown: None,
-            allow_when_locked: false,
-            allow_inhibiting: true,
-            hotkey_overlay_title: None,
-        }]);
-
-        let decide = |keysym: Keysym, modifiers: Modifiers| {
-            decide_hotkey(&binds, mod_key, keysym, modifiers)
+        let config = Config {
+            binds: Binds(vec![Bind {
+                key: Key {
+                    trigger: Trigger::Keysym(Keysym::t),
+                    modifiers: Modifiers::COMPOSITOR,
+                },
+                action: Action::CloseWindow,
+                repeat: false,
+                cooldown: None,
+                allow_when_locked: false,
+                allow_inhibiting: true,
+                hotkey_overlay_title: None,
+            }]),
+            ..Default::default()
         };
+
+        let decide =
+            |keysym: Keysym, modifiers: Modifiers| decide_hotkey(&config, mod_key, keysym, modifiers);
 
         // A normal modified combo that doesn't collide is accepted.
         assert!(decide(Keysym::space, Modifiers::CTRL).is_ok());
@@ -5606,28 +5627,40 @@ mod tests {
         // An invalid keysym is rejected.
         assert!(matches!(
             decide(Keysym::new(0), Modifiers::CTRL),
-            Err(Reason::Invalid)
+            Err((DenyReason::Invalid, _))
         ));
 
         // Security rule: a combination without Ctrl/Alt/Super and not a function key is rejected,
         // including Shift-only (which still carries ordinary text entry).
         assert!(matches!(
             decide(Keysym::k, Modifiers::empty()),
-            Err(Reason::NotPermitted)
+            Err((DenyReason::NotPermitted, _))
         ));
         assert!(matches!(
             decide(Keysym::k, Modifiers::SHIFT),
-            Err(Reason::NotPermitted)
+            Err((DenyReason::NotPermitted, _))
         ));
         // ...but a bare function key is the documented exception and is accepted.
         assert!(decide(Keysym::new(keysyms::KEY_F5), Modifiers::empty()).is_ok());
 
-        // Collides with the configured Mod+T bind (Mod resolves to Super) -> already_bound.
+        // Collides with the configured Mod+T bind (Mod resolves to Super) -> already_bound, and the
+        // message names the conflicting shortcut.
         assert!(matches!(
             decide(Keysym::t, Modifiers::SUPER),
-            Err(Reason::AlreadyBound)
+            Err((DenyReason::AlreadyBound, _))
         ));
+        assert_eq!(
+            decide(Keysym::t, Modifiers::SUPER).unwrap_err().1,
+            "Conflicts with user defined shortcut 'Close Focused Window'"
+        );
         // The same key with a different modifier set does not collide.
         assert!(decide(Keysym::t, Modifiers::CTRL).is_ok());
+
+        // The built-in Alt+Tab window switcher (a recent-windows bind, outside the general binds)
+        // is also detected as a conflict.
+        assert!(matches!(
+            decide(Keysym::Tab, Modifiers::ALT),
+            Err((DenyReason::AlreadyBound, _))
+        ));
     }
 }
