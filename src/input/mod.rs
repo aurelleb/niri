@@ -49,6 +49,7 @@ use crate::dbus::freedesktop_a11y::KbMonBlock;
 use crate::layout::scrolling::ScrollDirection;
 use crate::layout::{ActivateWindow, LayoutElement as _};
 use crate::niri::{CastTarget, PointerVisibility, State};
+use crate::protocols::ext_hotkey::Reason;
 use crate::ui::mru::{WindowMru, WindowMruUi};
 use crate::ui::screenshot_ui::ScreenshotUi;
 use crate::utils::spawning::{spawn, spawn_sh};
@@ -555,6 +556,33 @@ impl State {
                 };
 
                 if matches!(res, FilterResult::Forward) {
+                    // Client-managed global hotkeys (ext_hotkey_v1). These only fire when no niri
+                    // bind matched, so configured binds always take precedence. A client that
+                    // inhibits shortcuts wants every key, so don't fire new hotkeys while
+                    // inhibited; releases still go through so an already-pressed hotkey isn't left
+                    // stuck.
+                    let semantic = modifiers
+                        & (Modifiers::CTRL | Modifiers::SHIFT | Modifiers::ALT | Modifiers::SUPER);
+                    let serial = u32::from(serial);
+                    let hotkeys = &mut this.niri.ext_hotkey_state;
+                    if !pressed {
+                        if hotkeys.on_key_release(key_code.raw(), serial, time) {
+                            return FilterResult::Intercept(None);
+                        }
+                    } else if !is_inhibiting_shortcuts {
+                        if let Some(raw) = raw {
+                            if hotkeys.on_key_press(
+                                key_code.raw(),
+                                raw.raw(),
+                                semantic,
+                                serial,
+                                time,
+                            ) {
+                                return FilterResult::Intercept(None);
+                            }
+                        }
+                    }
+
                     // If we didn't find any bind, try other hardcoded keys.
                     if this.niri.keyboard_focus.is_overview() && pressed {
                         if let Some(bind) = raw.and_then(|raw| hardcoded_overview_bind(raw, *mods))
@@ -4520,6 +4548,62 @@ fn find_configured_bind<'a>(
     None
 }
 
+/// Decide whether a client may bind the given global hotkey (`ext_hotkey_v1`), per compositor
+/// policy. Returns `Ok(())` to accept or `Err(reason)` to reject with `denied`.
+///
+/// Rejects:
+/// - an invalid keysym (`Reason::Invalid`);
+/// - combinations without a non-latching modifier (Ctrl/Alt/Super) unless the trigger is a
+///   function key, as the protocol recommends, to avoid turning it into a keylogger
+///   (`Reason::NotPermitted`);
+/// - combinations that collide with a configured niri bind (`Reason::AlreadyBound`).
+///
+/// `modifiers` must contain only the semantic bits (CTRL, SHIFT, ALT, SUPER).
+pub(crate) fn decide_hotkey(
+    binds: &Binds,
+    mod_key: ModKey,
+    keysym: Keysym,
+    modifiers: Modifiers,
+) -> Result<(), Reason> {
+    if keysym.raw() == 0 {
+        return Err(Reason::Invalid);
+    }
+
+    let has_real_mod = modifiers.intersects(Modifiers::CTRL | Modifiers::ALT | Modifiers::SUPER);
+    if !has_real_mod && !is_function_key(keysym) {
+        return Err(Reason::NotPermitted);
+    }
+
+    if hotkey_conflicts_with_binds(binds, mod_key, keysym, modifiers) {
+        return Err(Reason::AlreadyBound);
+    }
+
+    Ok(())
+}
+
+fn is_function_key(keysym: Keysym) -> bool {
+    (keysyms::KEY_F1..=keysyms::KEY_F35).contains(&keysym.raw())
+}
+
+/// Whether the given global-hotkey combination collides with a configured niri bind. Matched the
+/// same way as live key presses (via [`find_configured_bind`]) so the answer is consistent with
+/// runtime behavior, including the `Mod` key resolution.
+pub(crate) fn hotkey_conflicts_with_binds(
+    binds: &Binds,
+    mod_key: ModKey,
+    keysym: Keysym,
+    modifiers: Modifiers,
+) -> bool {
+    let mods = ModifiersState {
+        ctrl: modifiers.contains(Modifiers::CTRL),
+        alt: modifiers.contains(Modifiers::ALT),
+        shift: modifiers.contains(Modifiers::SHIFT),
+        logo: modifiers.contains(Modifiers::SUPER),
+        ..Default::default()
+    };
+    find_configured_bind(&binds.0, mod_key, Trigger::Keysym(keysym), mods).is_some()
+}
+
 fn find_configured_switch_action(
     bindings: &SwitchBinds,
     switch: Switch,
@@ -5493,5 +5577,57 @@ mod tests {
             ),
             None,
         );
+    }
+
+    #[test]
+    fn ext_hotkey_decide_policy() {
+        // The user has Mod+T configured, with Mod = Super.
+        let mod_key = ModKey::Super;
+        let binds = Binds(vec![Bind {
+            key: Key {
+                trigger: Trigger::Keysym(Keysym::t),
+                modifiers: Modifiers::COMPOSITOR,
+            },
+            action: Action::CloseWindow,
+            repeat: false,
+            cooldown: None,
+            allow_when_locked: false,
+            allow_inhibiting: true,
+            hotkey_overlay_title: None,
+        }]);
+
+        let decide = |keysym: Keysym, modifiers: Modifiers| {
+            decide_hotkey(&binds, mod_key, keysym, modifiers)
+        };
+
+        // A normal modified combo that doesn't collide is accepted.
+        assert!(decide(Keysym::space, Modifiers::CTRL).is_ok());
+
+        // An invalid keysym is rejected.
+        assert!(matches!(
+            decide(Keysym::new(0), Modifiers::CTRL),
+            Err(Reason::Invalid)
+        ));
+
+        // Security rule: a combination without Ctrl/Alt/Super and not a function key is rejected,
+        // including Shift-only (which still carries ordinary text entry).
+        assert!(matches!(
+            decide(Keysym::k, Modifiers::empty()),
+            Err(Reason::NotPermitted)
+        ));
+        assert!(matches!(
+            decide(Keysym::k, Modifiers::SHIFT),
+            Err(Reason::NotPermitted)
+        ));
+        // ...but a bare function key is the documented exception and is accepted.
+        assert!(decide(Keysym::new(keysyms::KEY_F5), Modifiers::empty()).is_ok());
+
+        // Collides with the configured Mod+T bind (Mod resolves to Super) -> already_bound.
+        assert!(matches!(
+            decide(Keysym::t, Modifiers::SUPER),
+            Err(Reason::AlreadyBound)
+        ));
+        // The same key with a different modifier set does not collide.
+        assert!(decide(Keysym::t, Modifiers::CTRL).is_ok());
     }
 }
