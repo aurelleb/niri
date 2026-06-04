@@ -1540,18 +1540,12 @@ impl State {
                 mods_with_finger_scroll_binds(new_mod_key, &config.binds);
 
             // ext-hotkey: a config change may introduce new user defined shortcuts that should
-            // replace what was previously owned by a client. 
-            self.niri.ext_hotkey_state.revoke_if(
-                RevokeReason::Superseded,
-                |keysym, modifiers| {
-                    crate::input::conflicting_bind_message(
-                        &config,
-                        new_mod_key,
-                        keysym,
-                        modifiers,
-                    )
-                },
-            );
+            // replace what was previously owned by a client.
+            self.niri
+                .ext_hotkey_state
+                .revoke_if(RevokeReason::Superseded, |keysym, modifiers| {
+                    crate::input::conflicting_bind_message(&config, new_mod_key, keysym, modifiers)
+                });
         }
 
         if config.window_rules != old_config.window_rules {

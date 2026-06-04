@@ -556,8 +556,9 @@ impl State {
                 };
 
                 if matches!(res, FilterResult::Forward) {
-                    // Client-managed global hotkeys (ext_hotkey_v1). 
-                    // These only fire when no niri bind matched, so configured binds always take precedence.
+                    // Client-managed global hotkeys (ext_hotkey_v1).
+                    // These only fire when no niri bind matched, so configured binds always take
+                    // precedence.
                     let semantic = modifiers
                         & (Modifiers::CTRL | Modifiers::SHIFT | Modifiers::ALT | Modifiers::SUPER);
                     let serial = u32::from(serial);
@@ -4557,7 +4558,10 @@ pub(crate) fn decide_hotkey(
     modifiers: Modifiers,
 ) -> Result<(), (DenyReason, String)> {
     if keysym.raw() == 0 {
-        return Err((DenyReason::Invalid, String::from("Not a valid key combination")));
+        return Err((
+            DenyReason::Invalid,
+            String::from("Not a valid key combination"),
+        ));
     }
 
     let has_real_mod = modifiers.intersects(Modifiers::CTRL | Modifiers::ALT | Modifiers::SUPER);
@@ -5612,13 +5616,14 @@ mod tests {
             ..Default::default()
         };
 
-        let decide =
-            |keysym: Keysym, modifiers: Modifiers| decide_hotkey(&config, mod_key, keysym, modifiers);
+        let decide = |keysym: Keysym, modifiers: Modifiers| {
+            decide_hotkey(&config, mod_key, keysym, modifiers)
+        };
 
         // A normal modified combo that doesn't collide is accepted.
         assert!(decide(Keysym::space, Modifiers::CTRL).is_ok());
 
-        // We reject an invalid keysym 
+        // We reject an invalid keysym
         assert!(matches!(
             decide(Keysym::new(0), Modifiers::CTRL),
             Err((DenyReason::Invalid, _))

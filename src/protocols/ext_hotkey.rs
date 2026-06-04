@@ -1,7 +1,9 @@
 //! The `ext_hotkey_v1` protocol: client-managed global hotkeys. A client binds a key combination
 //! and the compositor arbitrates (`bound`/`denied`/`revoked`);
-//! For every bind that is accepted, the compositor fires `pressed`/ `released` regardless of keyboard focus.
+//! For every bind that is accepted, the compositor fires `pressed`/ `released` regardless of
+//! keyboard focus.
 
+pub use ext_hotkey_v1::{DenyReason, RevokeReason};
 use niri_config::Modifiers;
 use smithay::input::keyboard::Keysym;
 use smithay::reexports::wayland_server::backend::ClientId;
@@ -11,8 +13,6 @@ use smithay::reexports::wayland_server::{
 
 use super::raw::ext_hotkey::v1::server::ext_hotkey_manager_v1::{self, ExtHotkeyManagerV1};
 use super::raw::ext_hotkey::v1::server::ext_hotkey_v1::{self, ExtHotkeyV1};
-
-pub use ext_hotkey_v1::{DenyReason, RevokeReason};
 
 const VERSION: u32 = 1;
 
@@ -44,7 +44,8 @@ pub trait ExtHotkeyHandler {
 
     // Compositor policy: accept or deny a bind request, where
     // `message` is advisory text for the client's UI. `modifiers` holds only the semantic bits.
-    // We try to forward the most helpful `message` we can so that clients can gracefully communicate errors to the user.
+    // We try to forward the most helpful `message` we can so that clients can gracefully
+    // communicate errors to the user.
     fn ext_hotkey_decide(
         &mut self,
         keysym: Keysym,
