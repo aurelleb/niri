@@ -1539,9 +1539,8 @@ impl State {
             self.niri.mods_with_finger_scroll_binds =
                 mods_with_finger_scroll_binds(new_mod_key, &config.binds);
 
-            // Revoke any active client hotkey that now conflicts with a configured bind. The
-            // configured bind takes the combination, so it's superseded (and may free up again if
-            // the user later removes that bind).
+            // ext-hotkey: a config change may introduce new user defined shortcuts that should
+            // replace what was previously owned by a client. 
             self.niri.ext_hotkey_state.revoke_if(
                 RevokeReason::Superseded,
                 |keysym, modifiers| {
