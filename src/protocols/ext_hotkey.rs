@@ -1,6 +1,6 @@
 //! The `ext_hotkey_v1` protocol: client-managed global hotkeys. A client binds a key combination
-//! and the compositor arbitrates (`bound`/`denied`/`revoked`); while bound it fires `pressed`/
-//! `released` regardless of keyboard focus. All policy lives in niri behind [`ExtHotkeyHandler`].
+//! and the compositor arbitrates (`bound`/`denied`/`revoked`);
+//! For every bind that is accepted, the compositor fires `pressed`/ `released` regardless of keyboard focus.
 
 use niri_config::Modifiers;
 use smithay::input::keyboard::Keysym;
@@ -42,8 +42,9 @@ pub struct ExtHotkeyManagerGlobalData {
 pub trait ExtHotkeyHandler {
     fn ext_hotkey_manager_state(&mut self) -> &mut ExtHotkeyManagerState;
 
-    // Compositor policy: accept (`Ok`) or reject (`Err((reason, message))`) a bind request, where
+    // Compositor policy: accept or deny a bind request, where
     // `message` is advisory text for the client's UI. `modifiers` holds only the semantic bits.
+    // We try to forward the most helpful `message` we can so that clients can gracefully communicate errors to the user.
     fn ext_hotkey_decide(
         &mut self,
         keysym: Keysym,
@@ -114,8 +115,8 @@ impl ExtHotkeyManagerState {
         fired
     }
 
-    // Revoke (`revoked`) every active hotkey for which `revoke_message` returns `Some(message)`;
-    // `None` keeps the hotkey. Used on config reload when a newly configured bind now conflicts.
+    // revoke hotkeys that may be invalidated by a change in compositor policy or by a config
+    // reload.
     pub fn revoke_if(
         &mut self,
         reason: RevokeReason,
@@ -236,8 +237,7 @@ where
     }
 }
 
-// Convert the protocol's modifier bitmask to niri's semantic modifiers. Bit values are fixed by
-// the protocol (shift=1, ctrl=2, alt=4, super=8); unknown bits are ignored.
+// protocol mods to niri mods
 fn parse_modifiers(modifiers: WEnum<ext_hotkey_manager_v1::Modifiers>) -> Modifiers {
     let bits = match modifiers {
         WEnum::Value(m) => m.bits(),

@@ -556,11 +556,8 @@ impl State {
                 };
 
                 if matches!(res, FilterResult::Forward) {
-                    // Client-managed global hotkeys (ext_hotkey_v1). These only fire when no niri
-                    // bind matched, so configured binds always take precedence. A client that
-                    // inhibits shortcuts wants every key, so don't fire new hotkeys while
-                    // inhibited; releases still go through so an already-pressed hotkey isn't left
-                    // stuck.
+                    // Client-managed global hotkeys (ext_hotkey_v1). 
+                    // These only fire when no niri bind matched, so configured binds always take precedence.
                     let semantic = modifiers
                         & (Modifiers::CTRL | Modifiers::SHIFT | Modifiers::ALT | Modifiers::SUPER);
                     let serial = u32::from(serial);
@@ -4548,9 +4545,11 @@ fn find_configured_bind<'a>(
     None
 }
 
-// ext_hotkey_v1 bind policy. The combination must include Ctrl/Alt/Super (unless it's a function
-// key) so we don't turn into a keylogger, and must not collide with a configured niri bind.
-// `modifiers` holds only the semantic bits; the returned message is advisory text for the client.
+// the ext-hotkey bind policy.
+// In order to prevent clients from hijacking important keybinds, we define our own rules
+// for what clients are allowed to bind or not.
+// NOTE: it's yet unclear how much we want to harden this. Maybe we should propose something more
+// relaxed by default? Allow some tweaking by users through config keys?
 pub(crate) fn decide_hotkey(
     config: &Config,
     mod_key: ModKey,
@@ -4580,9 +4579,7 @@ fn is_function_key(keysym: Keysym) -> bool {
     (keysyms::KEY_F1..=keysyms::KEY_F35).contains(&keysym.raw())
 }
 
-// Matched via find_configured_bind, the same path as live key presses, so it stays consistent with
-// runtime behavior including the Mod key resolution. Includes the recent-windows (Alt+Tab) binds,
-// which are live whenever that feature is on even though they live outside the general binds.
+// checks if a default or user configured niri bind clashes with the requested one
 pub(crate) fn conflicting_bind(
     config: &Config,
     mod_key: ModKey,
@@ -4605,7 +4602,6 @@ pub(crate) fn conflicting_bind(
 }
 
 pub(crate) fn conflict_message(bind: &Bind) -> String {
-    // Same name niri shows in its hotkey overlay: custom title if set, else the action name.
     let name = match &bind.hotkey_overlay_title {
         Some(Some(custom)) => custom.clone(),
         _ => crate::ui::hotkey_overlay::action_name(&bind.action),
@@ -5599,8 +5595,6 @@ mod tests {
 
     #[test]
     fn ext_hotkey_decide_policy() {
-        // The user has Mod+T configured, with Mod = Super. recent-windows is left at its default
-        // (on, with the built-in Alt+Tab binds).
         let mod_key = ModKey::Super;
         let config = Config {
             binds: Binds(vec![Bind {
@@ -5624,14 +5618,13 @@ mod tests {
         // A normal modified combo that doesn't collide is accepted.
         assert!(decide(Keysym::space, Modifiers::CTRL).is_ok());
 
-        // An invalid keysym is rejected.
+        // We reject an invalid keysym 
         assert!(matches!(
             decide(Keysym::new(0), Modifiers::CTRL),
             Err((DenyReason::Invalid, _))
         ));
 
-        // Security rule: a combination without Ctrl/Alt/Super and not a function key is rejected,
-        // including Shift-only (which still carries ordinary text entry).
+        // compositor policy: non function key binds without a latching modifier are not accepted
         assert!(matches!(
             decide(Keysym::k, Modifiers::empty()),
             Err((DenyReason::NotPermitted, _))
@@ -5640,7 +5633,8 @@ mod tests {
             decide(Keysym::k, Modifiers::SHIFT),
             Err((DenyReason::NotPermitted, _))
         ));
-        // ...but a bare function key is the documented exception and is accepted.
+
+        // bare function key is ok
         assert!(decide(Keysym::new(keysyms::KEY_F5), Modifiers::empty()).is_ok());
 
         // Collides with the configured Mod+T bind (Mod resolves to Super) -> already_bound, and the
@@ -5653,6 +5647,7 @@ mod tests {
             decide(Keysym::t, Modifiers::SUPER).unwrap_err().1,
             "Conflicts with user defined shortcut 'Close Focused Window'"
         );
+
         // The same key with a different modifier set does not collide.
         assert!(decide(Keysym::t, Modifiers::CTRL).is_ok());
 
