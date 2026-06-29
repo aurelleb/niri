@@ -224,7 +224,6 @@ where
                     return;
                 }
 
-                hotkey.bound();
                 mgr.hotkeys.push(BoundHotkey {
                     resource: hotkey,
                     keysym: keysym.raw(),
@@ -232,6 +231,7 @@ where
                     app_id,
                     description,
                 });
+                hotkey.bound();
             }
             vicinae_hotkey_manager_v1::Request::Destroy => (),
         }
