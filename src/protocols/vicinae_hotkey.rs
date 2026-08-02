@@ -4,12 +4,12 @@
 //! keyboard focus.
 
 use niri_config::Modifiers;
-use smithay::input::keyboard::Keysym;
+use smithay::input::keyboard::{keysyms, Keysym};
 use smithay::reexports::wayland_server::backend::ClientId;
 use smithay::reexports::wayland_server::{
     Client, DataInit, Dispatch, DisplayHandle, GlobalDispatch, New, Resource, WEnum,
 };
-pub use vicinae_hotkey_v1::{DenyReason, RevokeReason};
+pub use vicinae_hotkey_v1::DenyReason;
 
 use super::raw::vicinae_hotkey::v1::server::vicinae_hotkey_manager_v1::{
     self, VicinaeHotkeyManagerV1,
@@ -30,9 +30,10 @@ struct BoundHotkey {
     keysym: u32,
     // Semantic modifier bits only (CTRL, SHIFT, ALT, SUPER).
     modifiers: Modifiers,
-    // Advisory (and spoofable) identity from the bind request, used only to build a human-readable
-    // already_bound message so a clashing client can show what owns the combination.
+    // Advisory (and spoofable) identity from the bind request, for the audit surface.
+    #[allow(dead_code)]
     app_id: String,
+    #[allow(dead_code)]
     description: String,
 }
 
@@ -92,7 +93,7 @@ impl VicinaeHotkeyManagerState {
     ) -> bool {
         let mut fired = false;
         for hotkey in &self.hotkeys {
-            if hotkey.keysym == keysym
+            if normalize_keypad(hotkey.keysym) == normalize_keypad(keysym)
                 && hotkey.modifiers == modifiers
                 && hotkey.resource.is_alive()
             {
@@ -120,24 +121,6 @@ impl VicinaeHotkeyManagerState {
             false
         });
         fired
-    }
-
-    // revoke hotkeys that may be invalidated by a change in compositor policy or by a config
-    // reload.
-    pub fn revoke_if(
-        &mut self,
-        reason: RevokeReason,
-        mut revoke_message: impl FnMut(Keysym, Modifiers) -> Option<String>,
-    ) {
-        self.hotkeys.retain(|hotkey| {
-            let Some(message) = revoke_message(Keysym::new(hotkey.keysym), hotkey.modifiers) else {
-                return true;
-            };
-            if hotkey.resource.is_alive() {
-                hotkey.resource.revoked(reason, message);
-            }
-            false
-        });
     }
 
     fn forget(&mut self, resource: &VicinaeHotkeyV1) {
@@ -201,31 +184,14 @@ where
                 let keysym = Keysym::new(keysym);
                 let modifiers = parse_modifiers(modifiers);
 
-                // Compositor policy (combination validity, conflicts with configured binds).
                 if let Err((reason, message)) = state.vicinae_hotkey_decide(keysym, modifiers) {
                     hotkey.denied(reason, message);
                     return;
                 }
 
-                // Exclusivity: the combination is owned by at most one hotkey. If another already
-                // holds it, deny and name the owner so the client can show what owns it.
                 let mgr = state.vicinae_hotkey_manager_state();
-                let owner = mgr
-                    .hotkeys
-                    .iter()
-                    .find(|h| {
-                        h.keysym == keysym.raw()
-                            && h.modifiers == modifiers
-                            && h.resource.is_alive()
-                    })
-                    .map(|h| already_bound_message(&h.app_id, &h.description));
-                if let Some(message) = owner {
-                    hotkey.denied(DenyReason::AlreadyBound, message);
-                    return;
-                }
-
                 mgr.hotkeys.push(BoundHotkey {
-                    resource: hotkey,
+                    resource: hotkey.clone(),
                     keysym: keysym.raw(),
                     modifiers,
                     app_id,
@@ -263,12 +229,21 @@ where
     }
 }
 
-fn already_bound_message(app_id: &str, description: &str) -> String {
-    match (app_id.is_empty(), description.is_empty()) {
-        (false, false) => format!("Already bound by {app_id} ({description})"),
-        (false, true) => format!("Already bound by {app_id}"),
-        (true, false) => format!("Already bound ({description})"),
-        (true, true) => String::from("Already bound by another application"),
+// Num Lock selects one of two keysyms per numeric keypad key; fold each pair.
+fn normalize_keypad(keysym: u32) -> u32 {
+    match keysym {
+        keysyms::KEY_KP_Insert => keysyms::KEY_KP_0,
+        keysyms::KEY_KP_End => keysyms::KEY_KP_1,
+        keysyms::KEY_KP_Down => keysyms::KEY_KP_2,
+        keysyms::KEY_KP_Next => keysyms::KEY_KP_3,
+        keysyms::KEY_KP_Left => keysyms::KEY_KP_4,
+        keysyms::KEY_KP_Begin => keysyms::KEY_KP_5,
+        keysyms::KEY_KP_Right => keysyms::KEY_KP_6,
+        keysyms::KEY_KP_Home => keysyms::KEY_KP_7,
+        keysyms::KEY_KP_Up => keysyms::KEY_KP_8,
+        keysyms::KEY_KP_Prior => keysyms::KEY_KP_9,
+        keysyms::KEY_KP_Delete => keysyms::KEY_KP_Decimal,
+        _ => keysym,
     }
 }
 

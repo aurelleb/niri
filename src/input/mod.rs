@@ -555,30 +555,31 @@ impl State {
                     )
                 };
 
+                // Client-managed global hotkeys (vicinae_hotkey_v1). Not exclusive: configured
+                // binds and every matching hotkey all fire, only delivery to the focused client
+                // is suppressed.
+                let semantic = modifiers
+                    & (Modifiers::CTRL | Modifiers::SHIFT | Modifiers::ALT | Modifiers::SUPER);
+                let hotkeys = &mut this.niri.vicinae_hotkey_state;
+                let hotkey_fired = if !pressed {
+                    hotkeys.on_key_release(key_code.raw(), u32::from(serial), time)
+                } else if !is_inhibiting_shortcuts {
+                    raw.is_some_and(|raw| {
+                        hotkeys.on_key_press(
+                            key_code.raw(),
+                            raw.raw(),
+                            semantic,
+                            u32::from(serial),
+                            time,
+                        )
+                    })
+                } else {
+                    false
+                };
+
                 if matches!(res, FilterResult::Forward) {
-                    // Client-managed global hotkeys (vicinae_hotkey_v1).
-                    // These only fire when no niri bind matched, so configured binds always take
-                    // precedence.
-                    let semantic = modifiers
-                        & (Modifiers::CTRL | Modifiers::SHIFT | Modifiers::ALT | Modifiers::SUPER);
-                    let serial = u32::from(serial);
-                    let hotkeys = &mut this.niri.vicinae_hotkey_state;
-                    if !pressed {
-                        if hotkeys.on_key_release(key_code.raw(), serial, time) {
-                            return FilterResult::Intercept(None);
-                        }
-                    } else if !is_inhibiting_shortcuts {
-                        if let Some(raw) = raw {
-                            if hotkeys.on_key_press(
-                                key_code.raw(),
-                                raw.raw(),
-                                semantic,
-                                serial,
-                                time,
-                            ) {
-                                return FilterResult::Intercept(None);
-                            }
-                        }
+                    if hotkey_fired {
+                        return FilterResult::Intercept(None);
                     }
 
                     // If we didn't find any bind, try other hardcoded keys.
@@ -4596,17 +4597,9 @@ fn find_configured_bind<'a>(
     None
 }
 
-// the vicinae-hotkey bind policy.
-// In order to prevent clients from hijacking important keybinds, we define our own rules
-// for what clients are allowed to bind or not.
-// NOTE: it's yet unclear how much we want to harden this. Maybe we should propose something more
-// relaxed by default? Allow some tweaking by users through config keys?
-pub(crate) fn decide_hotkey(
-    config: &Config,
-    mod_key: ModKey,
-    keysym: Keysym,
-    modifiers: Modifiers,
-) -> Result<(), (DenyReason, String)> {
+// the vicinae-hotkey bind policy; see the suggested acceptance policy in the protocol's
+// security considerations.
+pub(crate) fn decide_hotkey(keysym: Keysym, modifiers: Modifiers) -> Result<(), (DenyReason, String)> {
     if keysym.raw() == 0 {
         return Err((
             DenyReason::Invalid,
@@ -4614,62 +4607,30 @@ pub(crate) fn decide_hotkey(
         ));
     }
 
-    let has_real_mod = modifiers.intersects(Modifiers::CTRL | Modifiers::ALT | Modifiers::SUPER);
-    if !has_real_mod && !is_function_key(keysym) {
-        return Err((
-            DenyReason::NotPermitted,
-            String::from("This key combination requires Ctrl, Alt or Super"),
-        ));
+    if modifiers.intersects(Modifiers::CTRL | Modifiers::ALT | Modifiers::SUPER) {
+        return Ok(());
     }
 
-    if let Some(bind) = conflicting_bind(config, mod_key, keysym, modifiers) {
-        return Err((DenyReason::AlreadyBound, conflict_message(&bind)));
+    if is_keypad_key(keysym) {
+        return Ok(());
+    }
+
+    if is_dead_key(keysym) || keysym.key_char().is_some() {
+        return Err((
+            DenyReason::NotPermitted,
+            String::from("Ctrl, Alt or Super is required when the trigger key carries text entry"),
+        ));
     }
 
     Ok(())
 }
 
-fn is_function_key(keysym: Keysym) -> bool {
-    (keysyms::KEY_F1..=keysyms::KEY_F35).contains(&keysym.raw())
+fn is_keypad_key(keysym: Keysym) -> bool {
+    (keysyms::KEY_KP_Space..=keysyms::KEY_KP_Equal).contains(&keysym.raw())
 }
 
-// checks if a default or user configured niri bind clashes with the requested one
-pub(crate) fn conflicting_bind(
-    config: &Config,
-    mod_key: ModKey,
-    keysym: Keysym,
-    modifiers: Modifiers,
-) -> Option<Bind> {
-    let mods = ModifiersState {
-        ctrl: modifiers.contains(Modifiers::CTRL),
-        alt: modifiers.contains(Modifiers::ALT),
-        shift: modifiers.contains(Modifiers::SHIFT),
-        logo: modifiers.contains(Modifiers::SUPER),
-        ..Default::default()
-    };
-    let recent = config
-        .recent_windows
-        .on
-        .then_some(config.recent_windows.binds.as_slice());
-    let binds = config.binds.0.iter().chain(recent.into_iter().flatten());
-    find_configured_bind(binds, mod_key, Trigger::Keysym(keysym), mods)
-}
-
-pub(crate) fn conflict_message(bind: &Bind) -> String {
-    let name = match &bind.hotkey_overlay_title {
-        Some(Some(custom)) => custom.clone(),
-        _ => crate::ui::hotkey_overlay::action_name(&bind.action),
-    };
-    format!("Conflicts with user defined shortcut '{name}'")
-}
-
-pub(crate) fn conflicting_bind_message(
-    config: &Config,
-    mod_key: ModKey,
-    keysym: Keysym,
-    modifiers: Modifiers,
-) -> Option<String> {
-    conflicting_bind(config, mod_key, keysym, modifiers).map(|bind| conflict_message(&bind))
+fn is_dead_key(keysym: Keysym) -> bool {
+    (keysyms::KEY_dead_grave..=keysyms::KEY_dead_longsolidusoverlay).contains(&keysym.raw())
 }
 
 fn find_configured_switch_action(
@@ -5661,37 +5622,18 @@ mod tests {
 
     #[test]
     fn vicinae_hotkey_decide_policy() {
-        let mod_key = ModKey::Super;
-        let config = Config {
-            binds: Binds(vec![Bind {
-                key: Key {
-                    trigger: Trigger::Keysym(Keysym::t),
-                    modifiers: Modifiers::COMPOSITOR,
-                },
-                action: Action::CloseWindow,
-                repeat: false,
-                cooldown: None,
-                allow_when_locked: false,
-                allow_inhibiting: true,
-                hotkey_overlay_title: None,
-            }]),
-            ..Default::default()
-        };
+        let decide = decide_hotkey;
 
-        let decide = |keysym: Keysym, modifiers: Modifiers| {
-            decide_hotkey(&config, mod_key, keysym, modifiers)
-        };
-
-        // A normal modified combo that doesn't collide is accepted.
+        // Modified combinations are always acceptable, even over configured binds.
         assert!(decide(Keysym::space, Modifiers::CTRL).is_ok());
+        assert!(decide(Keysym::t, Modifiers::SUPER).is_ok());
 
-        // We reject an invalid keysym
         assert!(matches!(
             decide(Keysym::new(0), Modifiers::CTRL),
             Err((DenyReason::Invalid, _))
         ));
 
-        // compositor policy: non function key binds without a latching modifier are not accepted
+        // Text-carrying keys require a modifier; Shift alone doesn't count.
         assert!(matches!(
             decide(Keysym::k, Modifiers::empty()),
             Err((DenyReason::NotPermitted, _))
@@ -5700,29 +5642,19 @@ mod tests {
             decide(Keysym::k, Modifiers::SHIFT),
             Err((DenyReason::NotPermitted, _))
         ));
+        assert!(matches!(
+            decide(Keysym::Return, Modifiers::empty()),
+            Err((DenyReason::NotPermitted, _))
+        ));
+        assert!(matches!(
+            decide(Keysym::new(keysyms::KEY_dead_grave), Modifiers::empty()),
+            Err((DenyReason::NotPermitted, _))
+        ));
 
-        // bare function key is ok
+        // Purely functional keys and the keypad bind bare.
         assert!(decide(Keysym::new(keysyms::KEY_F5), Modifiers::empty()).is_ok());
-
-        // Collides with the configured Mod+T bind (Mod resolves to Super) -> already_bound, and the
-        // message names the conflicting shortcut.
-        assert!(matches!(
-            decide(Keysym::t, Modifiers::SUPER),
-            Err((DenyReason::AlreadyBound, _))
-        ));
-        assert_eq!(
-            decide(Keysym::t, Modifiers::SUPER).unwrap_err().1,
-            "Conflicts with user defined shortcut 'Close Focused Window'"
-        );
-
-        // The same key with a different modifier set does not collide.
-        assert!(decide(Keysym::t, Modifiers::CTRL).is_ok());
-
-        // The built-in Alt+Tab window switcher (a recent-windows bind, outside the general binds)
-        // is also detected as a conflict.
-        assert!(matches!(
-            decide(Keysym::Tab, Modifiers::ALT),
-            Err((DenyReason::AlreadyBound, _))
-        ));
+        assert!(decide(Keysym::new(keysyms::KEY_XF86AudioPlay), Modifiers::empty()).is_ok());
+        assert!(decide(Keysym::new(keysyms::KEY_KP_1), Modifiers::empty()).is_ok());
+        assert!(decide(Keysym::new(keysyms::KEY_KP_End), Modifiers::empty()).is_ok());
     }
 }

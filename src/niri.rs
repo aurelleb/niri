@@ -151,7 +151,7 @@ use crate::protocols::gamma_control::GammaControlManagerState;
 use crate::protocols::mutter_x11_interop::MutterX11InteropManagerState;
 use crate::protocols::output_management::OutputManagementManagerState;
 use crate::protocols::screencopy::{Screencopy, ScreencopyBuffer, ScreencopyManagerState};
-use crate::protocols::vicinae_hotkey::{RevokeReason, VicinaeHotkeyManagerState};
+use crate::protocols::vicinae_hotkey::VicinaeHotkeyManagerState;
 use crate::protocols::virtual_pointer::VirtualPointerManagerState;
 use crate::render_helpers::blur::BlurOptions;
 use crate::render_helpers::debug::push_opaque_regions;
@@ -1547,15 +1547,6 @@ impl State {
                 mods_with_tablet_stylus_binds(new_mod_key, &config.binds);
             self.niri.mods_with_finger_scroll_binds =
                 mods_with_finger_scroll_binds(new_mod_key, &config.binds);
-
-            // vicinae-hotkey: a config change may introduce new user defined shortcuts that should
-            // replace what was previously owned by a client.
-            self.niri.vicinae_hotkey_state.revoke_if(
-                RevokeReason::Superseded,
-                |keysym, modifiers| {
-                    crate::input::conflicting_bind_message(&config, new_mod_key, keysym, modifiers)
-                },
-            );
         }
 
         if config.window_rules != old_config.window_rules {

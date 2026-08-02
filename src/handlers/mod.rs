@@ -873,9 +873,7 @@ impl VicinaeHotkeyHandler for State {
         keysym: keyboard::Keysym,
         modifiers: niri_config::Modifiers,
     ) -> Result<(), (DenyReason, String)> {
-        let config = self.niri.config.borrow();
-        let mod_key = self.backend.mod_key(&config);
-        crate::input::decide_hotkey(&config, mod_key, keysym, modifiers)
+        crate::input::decide_hotkey(keysym, modifiers)
     }
 }
 delegate_vicinae_hotkey!(State);
