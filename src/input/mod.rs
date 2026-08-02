@@ -4599,7 +4599,10 @@ fn find_configured_bind<'a>(
 
 // the vicinae-hotkey bind policy; see the suggested acceptance policy in the protocol's
 // security considerations.
-pub(crate) fn decide_hotkey(keysym: Keysym, modifiers: Modifiers) -> Result<(), (DenyReason, String)> {
+pub(crate) fn decide_hotkey(
+    keysym: Keysym,
+    modifiers: Modifiers,
+) -> Result<(), (DenyReason, String)> {
     if keysym.raw() == 0 {
         return Err((
             DenyReason::Invalid,

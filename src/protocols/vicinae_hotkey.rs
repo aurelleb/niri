@@ -31,10 +31,15 @@ struct BoundHotkey {
     // Semantic modifier bits only (CTRL, SHIFT, ALT, SUPER).
     modifiers: Modifiers,
     // Advisory (and spoofable) identity from the bind request, for the audit surface.
-    #[allow(dead_code)]
     app_id: String,
-    #[allow(dead_code)]
     description: String,
+}
+
+pub struct GlobalShortcutInfo {
+    pub keysym: Keysym,
+    pub modifiers: Modifiers,
+    pub app_id: String,
+    pub description: String,
 }
 
 struct HeldHotkey {
@@ -121,6 +126,19 @@ impl VicinaeHotkeyManagerState {
             false
         });
         fired
+    }
+
+    pub fn shortcuts(&self) -> Vec<GlobalShortcutInfo> {
+        self.hotkeys
+            .iter()
+            .filter(|h| h.resource.is_alive())
+            .map(|h| GlobalShortcutInfo {
+                keysym: Keysym::new(h.keysym),
+                modifiers: h.modifiers,
+                app_id: h.app_id.clone(),
+                description: h.description.clone(),
+            })
+            .collect()
     }
 
     fn forget(&mut self, resource: &VicinaeHotkeyV1) {
